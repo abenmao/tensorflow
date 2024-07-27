@@ -90,9 +90,6 @@ struct LaunchFusedMatMulOp<CPUDevice, T> {
       const Eigen::array<Eigen::IndexPair<Eigen::DenseIndex>, 1>& dim_pair,
       FusedComputationType fusion, const FusedComputationArgs& fusion_args,
       Tensor* output, bool use_autotune) {
-    OP_REQUIRES(context, DataTypeToEnum<T>::value != DT_HALF,
-                errors::InvalidArgument("_FusedMatMul doesn't support DT_HALF "
-                                        "data type on CPU devices."));
     auto lhs = a.matrix<T>();
     auto rhs = b.matrix<T>();
     auto out = output->matrix<T>();
@@ -712,6 +709,7 @@ class FusedMatMulOp : public OpKernel {
       FusedMatMulOp<CPUDevice, T>);
 
 TF_CALL_float(REGISTER_FUSED_CPU_MATMUL);
+TF_CALL_half(REGISTER_FUSED_CPU_MATMUL);
 
 #undef REGISTER_FUSED_CPU_MATMUL
 

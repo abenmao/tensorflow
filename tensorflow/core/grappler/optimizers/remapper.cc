@@ -337,11 +337,10 @@ bool IsCpuCompatibleDataType(const NodeDef* contraction,
                                       !contraction->attr().at("transpose_a").b()
                                 : true;
     }
-    return (IsConv2D(*contraction) || IsDepthwiseConv2dNative(*contraction) ||
+    return ((IsConv2D(*contraction) || IsDepthwiseConv2dNative(*contraction) ||
             IsConv3D(*contraction) || IsAnyBatchMatMul(*contraction) ||
             is_supported_matmul) &&
-           (dtype == DT_FLOAT ||
-            (dtype == DT_BFLOAT16 && IsBF16SupportedByOneDNNOnThisCPU()));
+            IsDataTypeSupportedByOneDNNOnThisCPU(dtype));
   }
   if (IsConv2D(*contraction)) {
     return dtype == DT_FLOAT || dtype == DT_DOUBLE;
@@ -969,12 +968,14 @@ bool FindConv2DWithBatchNorm(const RemapperContext& ctx, int node_index,
   if (!IsFusedBatchNorm(*node_def)) return false;
 
   // FusedBatchNormV2 and V3 have an extra type parameter.
-  // Conv2D + FusedBatchNormV2/V3 fusion is currently not supported for bf16.
-  // TODO(intel-tf): enable the fusion for bf16
+  // Conv2D + FusedBatchNormV2/V3 fusion is currently supported only for fp32.
+  // TODO(intel-tf): Enable the fusion for bf16 and fp16.
   bool dtypeU_is_float = HasDataType(node_def, DT_FLOAT, "U");
   bool dtypeT_is_bf16 = HasDataType(node_def, DT_BFLOAT16, "T");
+  bool dtypeT_is_mkl_fp16 =
+      IsMKLEnabled() && HasDataType(node_def, DT_HALF, "T");
   if (node_view->GetOp() != "FusedBatchNorm" &&
-      (!dtypeU_is_float || dtypeT_is_bf16)) {
+      (!dtypeU_is_float || dtypeT_is_bf16 || dtypeT_is_mkl_fp16)) {
     return false;
   }
 
@@ -1099,7 +1100,8 @@ bool FindPadWithConv3D(const RemapperContext& ctx, int node_index,
   if (!NodeIsOnCpu(node_def)) return false;
   // Root of the pattern must be a Conv3D or _FusedConv3D
   if (!(IsConv3D(*node_def) || node_def->op() == kFusedConv3D)) return false;
-  if (!(HasDataType(node_def, DT_FLOAT) || HasDataType(node_def, DT_BFLOAT16)))
+  if (!(HasDataType(node_def, DT_FLOAT) || HasDataType(node_def, DT_BFLOAT16) ||
+        HasDataType(node_def, DT_HALF)))
     return false;
 
   // Input to Conv3D/_FusedConv3D must be a Pad
@@ -1137,8 +1139,9 @@ bool FindContractionWithBiasAddAndAdd(const RemapperContext& ctx,
 
   if (!NodeIsOnCpu(node_def)) return false;
 
-  // MKL AddN ops only support float and bfloat16 data types.
-  if (!HasDataType(node_def, DT_FLOAT) && !HasDataType(node_def, DT_BFLOAT16))
+  // MKL AddN ops only support float32, bfloat16 and float16 data types.
+  if (!(HasDataType(node_def, DT_FLOAT) || HasDataType(node_def, DT_BFLOAT16) ||
+        HasDataType(node_def, DT_HALF)))
     return false;
 
   ContractionWithBiasAdd base;
@@ -1191,8 +1194,9 @@ bool FindContractionWithBiasAndAddActivation(
   // this activation. TODO(intel-tf)
   if (IsSigmoid(*node_def)) return false;
 
-  // MKL activation op only supports float and bfloat16 data types.
-  if (!HasDataType(node_def, DT_FLOAT) && !HasDataType(node_def, DT_BFLOAT16))
+  // MKL activation op only supports float32, bfloat16 and float16 data types.
+  if (!(HasDataType(node_def, DT_FLOAT) || HasDataType(node_def, DT_BFLOAT16) ||
+        HasDataType(node_def, DT_HALF)))
     return false;
 
   // And input to activation must match ContractionWithBiasAddAndAdd pattern.
@@ -1337,8 +1341,9 @@ bool FindConv2DSwish(RemapperContext* ctx, int node_index,
   // clang-format on
   // check for data types
   auto* mul_node_def = ctx->graph_view.GetNode(node_index)->node();
-  if (!HasDataType(mul_node_def, DT_FLOAT) &&
-      !HasDataType(mul_node_def, DT_BFLOAT16))
+  if (!(HasDataType(mul_node_def, DT_FLOAT) ||
+        HasDataType(mul_node_def, DT_HALF) ||
+        HasDataType(mul_node_def, DT_BFLOAT16)))
     return false;
 
   if (!NodeIsOnCpu(mul_node_def)) return false;
@@ -1833,6 +1838,8 @@ bool FindMulAndMaximum(RemapperContext* ctx, int node_index,
       alpha_val = alpha_tensor.flat<float>()(0);
     } else if (dtype == DT_BFLOAT16) {
       alpha_val = static_cast<float>(alpha_tensor.flat<bfloat16>()(0));
+    } else if (dtype == DT_HALF) {
+      alpha_val = static_cast<float>(alpha_tensor.flat<Eigen::half>()(0));
     } else {
       return false;
     }
@@ -1869,8 +1876,9 @@ bool FindSigmoidAndMul(RemapperContext* ctx, int node_index,
   // clang-format on
   // check for data types
   auto* mul_node_def = ctx->graph_view.GetNode(node_index)->node();
-  if (!HasDataType(mul_node_def, DT_FLOAT) &&
-      !HasDataType(mul_node_def, DT_BFLOAT16))
+  if (!(HasDataType(mul_node_def, DT_FLOAT) ||
+        HasDataType(mul_node_def, DT_HALF) ||
+        HasDataType(mul_node_def, DT_BFLOAT16)))
     return false;
 
   if (!NodeIsOnCpu(mul_node_def)) return false;
@@ -2372,8 +2380,8 @@ bool FindFusedBatchNormEx(const RemapperContext& ctx, int node_index,
       if (t_dtype != DT_FLOAT && t_dtype != DT_HALF) return false;
     } else {
       // Bfloat16 is available only with oneDNN.
-      // Half is not available with oneDNN.
-      if (IsMKLEnabled() && t_dtype != DT_FLOAT && t_dtype != DT_BFLOAT16)
+      // Half is available with oneDNN.
+      if (IsMKLEnabled() && !IsDataTypeSupportedByOneDNNOnThisCPU(t_dtype))
         return false;
     }
 
@@ -2856,7 +2864,7 @@ bool FindInstanceNorm(RemapperContext* ctx, int node_index,
 
   DataType dtype = GetDataTypeFromAttr(*mean1_node, "T");
   // TODO(intel-tf): enable bfloat16 data type support
-  if (dtype != DT_FLOAT) return false;
+  if (dtype != DT_FLOAT && dtype != DT_HALF) return false;
 
   // Check if gamma and beta constants have the same shape
   NodeDef* gamma_node =
@@ -4226,6 +4234,8 @@ Status AddMklFusedInstanceNorm(RemapperContext* ctx,
     dtype = epsilon_tensor.dtype();
     if (dtype == DT_BFLOAT16) {
       epsilon_value = static_cast<float>(epsilon_tensor.flat<bfloat16>()(0));
+    } else if (dtype == DT_HALF) {
+      epsilon_value = static_cast<float>(epsilon_tensor.flat<Eigen::half>()(0));
     } else if (dtype == DT_FLOAT) {
       epsilon_value = epsilon_tensor.flat<float>()(0);
     }
@@ -4373,6 +4383,7 @@ bool FindSoftplusAndTanhAndMul(RemapperContext* ctx, int node_index,
   // check for data types
   auto* mul_node_def = ctx->graph_view.GetNode(node_index)->node();
   if (!HasDataType(mul_node_def, DT_FLOAT) &&
+      !HasDataType(mul_node_def, DT_HALF) &&
       !HasDataType(mul_node_def, DT_BFLOAT16))
     return false;
 
@@ -4657,9 +4668,13 @@ Status Remapper::Optimize(Cluster* cluster, const GrapplerItem& item,
       const auto* node_def = node_view->node();
       const string& type_attr = "T";
       DataType dtype = GetDataTypeFromAttr(*node_def, type_attr);
-      if (dtype == DT_BFLOAT16 && !IsBF16SupportedByOneDNNOnThisCPU()) {
+      // Check if BF16 and FP16 data types are supported by oneDNN,
+      // skipping fusions if it is not supported.
+      // Since the input type could be DT_INVALID, run type check only for
+      // BF16 and FP16.
+      if ((dtype == DT_BFLOAT16 || dtype == DT_HALF) &&
+          !IsDataTypeSupportedByOneDNNOnThisCPU(dtype))
         continue;
-      }
 
       // Remap Conv2D+BiasAdd+Add+relu into the _FusedConv2D.
       // or Remap Conv3D+BiasAdd+Add+relu into _FusedConv3D
