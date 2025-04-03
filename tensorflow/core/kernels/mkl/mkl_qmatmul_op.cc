@@ -262,7 +262,7 @@ class MklDnnQuantizedMatMulOp
                                           Toutput>::Get(matmul_fwd_dims, 0);
 
       // Allocate output Tensor.
-      std::shared_ptr<dnnl::inner_product_forward::primitive_desc>
+      std::shared_ptr<dnnl::matmul::primitive_desc>
           matmul_fwd_pd = matmul_fwd->GetPrimitiveDesc();
       this->AllocateOutputTensor(context, *matmul_fwd_pd, dst_dims_mkl_order,
                                  input_output_fmt_mkldnn, &dst_tensor,
@@ -515,7 +515,7 @@ class MklDnnQuantizedMatMulOp
 #ifndef ENABLE_ONEDNN_V3
   Tbias* GetBiasHandle(
       OpKernelContext* context,
-      std::shared_ptr<dnnl::inner_product_forward::primitive_desc>&
+      std::shared_ptr<dnnl::matmul::primitive_desc>&
           mkldnn_matmul_fwd_pd,
       const Tensor& bias_tensor, const Tensor& weight_tensor,
       std::shared_ptr<stream> reorder_stream) {
@@ -621,7 +621,7 @@ class MklDnnQuantizedMatMulOp
 #else
   void GetBiasHandle(
       OpKernelContext* context,
-      std::shared_ptr<dnnl::inner_product_forward::primitive_desc>&
+      std::shared_ptr<dnnl::matmul::primitive_desc>&
           mkldnn_matmul_fwd_pd,
       const Tensor& bias_tensor, const Tensor& weight_tensor,
       std::shared_ptr<stream> reorder_stream, Tensor* temp_scaled_bias_tensor,
